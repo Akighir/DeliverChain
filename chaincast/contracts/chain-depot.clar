@@ -1,3 +1,5 @@
+; Completed logistics platform with priority levels and user history tracking
+
 ;; Define constants
 (define-constant ERR-PERMISSION-DENIED (err u100))
 (define-constant ERR-PACKAGE-ALREADY-IN-TRANSIT (err u101))
@@ -8,6 +10,7 @@
 (define-constant ERR-COVERAGE-RATE-INVALID (err u106))
 (define-constant ERR-DELIVERY-TIME-INVALID (err u107))
 (define-constant ERR-PACKAGE-ID-INVALID (err u108))
+(define-constant ERR-URGENCY-LEVEL-INVALID (err u109))
 (define-constant ERR-PACKAGE-TERMINATED (err u110))
 
 ;; Define data maps
@@ -19,6 +22,7 @@
     package-size: uint,
     coverage-rate: uint,
     delivery-time: uint,
+    urgency-level: uint,
     pickup-block: (optional uint),
     delivery-address: (string-ascii 30),
     package-description: (string-ascii 20),
@@ -30,15 +34,21 @@
 
 (define-map agent-performance principal uint)
 
+(define-map customer-package-log
+  principal
+  (list 10 uint)
+)
+
 ;; Define functions
 (define-public (create-package (package-size uint) (coverage-rate uint) (delivery-time uint) 
-                               (delivery-address (string-ascii 30)) 
-                               (package-description (string-ascii 20)))
+                                 (urgency-level uint) (delivery-address (string-ascii 30)) 
+                                 (package-description (string-ascii 20)))
   (let ((package-id (+ (var-get package-counter) u1)))
     ;; Validate input parameters
     (asserts! (> package-size u0) ERR-PACKAGE-SIZE-INVALID)
     (asserts! (<= coverage-rate u50) ERR-COVERAGE-RATE-INVALID)
     (asserts! (and (> delivery-time u0) (<= delivery-time u10000)) ERR-DELIVERY-TIME-INVALID)
+    (asserts! (and (>= urgency-level u1) (<= urgency-level u5)) ERR-URGENCY-LEVEL-INVALID)
     
     (map-set package-registry 
       { package-id: package-id }
@@ -48,11 +58,22 @@
         package-size: package-size,
         coverage-rate: coverage-rate,
         delivery-time: delivery-time,
+        urgency-level: urgency-level,
         pickup-block: none,
         delivery-address: delivery-address,
         package-description: package-description,
         delivery-status: "READY"
       }
+    )
+    
+    ;; Update customer's package history - put the new package at the beginning
+    (let 
+      (
+        (current-log (default-to (list) (map-get? customer-package-log tx-sender)))
+        (updated-log (unwrap-panic (as-max-len? (concat (list package-id) current-log) u10)))
+      )
+      ;; Take only up to 10 elements
+      (map-set customer-package-log tx-sender updated-log)
     )
     
     (var-set package-counter package-id)
@@ -90,7 +111,8 @@
     (owner-balance (default-to u0 (map-get? token-balances tx-sender)))
     (base-fee (get package-size package-data))
     (coverage-fee (/ (* (get package-size package-data) (get coverage-rate package-data)) u100))
-    (total-fee (+ base-fee coverage-fee))
+    (urgency-fee (/ (* base-fee (get urgency-level package-data)) u100))
+    (total-fee (+ base-fee coverage-fee urgency-fee))
   )
     ;; Validate package ID and conditions
     (asserts! (<= package-id (var-get package-counter)) ERR-PACKAGE-ID-INVALID)
@@ -157,6 +179,17 @@
 
 (define-read-only (get-agent-score (agent principal))
   (default-to u0 (map-get? agent-performance agent))
+)
+
+(define-read-only (view-customer-packages (customer principal))
+  (default-to (list) (map-get? customer-package-log customer))
+)
+
+;; Calculate urgency multiplier
+(define-read-only (calculate-urgency-bonus (urgency-level uint))
+  (if (and (>= urgency-level u1) (<= urgency-level u5))
+      (* urgency-level u1)
+      u0)  ;; Return a default value if urgency level is invalid
 )
 
 ;; Initialize counters and data
